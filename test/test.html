@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>data-ime-mode 動作確認</title>
+<style>
+  body { font-family: "Meiryo", sans-serif; margin: 2rem; max-width: 44rem; line-height: 1.7; }
+  label { display: block; margin: 1.2rem 0 0.2rem; font-weight: bold; }
+  input, textarea { width: 24rem; padding: 0.4rem; font-size: 1rem; }
+  code { background: #eee; padding: 0.1rem 0.3rem; }
+  .note { color: #555; font-size: 0.9rem; margin: 0; }
+</style>
+</head>
+<body>
+<h1>data-ime-mode 動作確認</h1>
+<p>各欄をクリックし、タスクバーの IME 表示の変化を見てください。
+フォーカスを外すと元の状態に戻ります。</p>
+
+<label>1. 属性なし（対照）</label>
+<input type="text" placeholder="IME はそのまま">
+<p class="note">拡張機能は何もしません。</p>
+
+<label>2. <code>data-ime-mode="inactive"</code></label>
+<input type="text" data-ime-mode="inactive" placeholder="郵便番号・社員番号など">
+<p class="note">IME オフ。以降ユーザーは自由に切り替え可。</p>
+
+<label>3. <code>data-ime-mode="active"</code></label>
+<input type="text" data-ime-mode="active" placeholder="IME オンにするだけ">
+<p class="note">開閉のみ変更。変換モードは今のまま。</p>
+
+<label>4. <code>data-ime-mode="hiragana"</code></label>
+<input type="text" data-ime-mode="hiragana" placeholder="氏名・住所など">
+<p class="note">→ あ</p>
+
+<label>5. <code>data-ime-mode="katakana"</code>（全角カタカナ）</label>
+<input type="text" data-ime-mode="katakana" placeholder="フリガナ">
+<p class="note">→ ア　<code>full-katakana</code> でも同じ。</p>
+
+<label>6. <code>data-ime-mode="half-katakana"</code>（半角カタカナ）</label>
+<input type="text" data-ime-mode="half-katakana" placeholder="ﾌﾘｶﾞﾅ">
+<p class="note">→ _ｱ　全銀形式など半角カナが要る帳票向け。</p>
+
+<label>7. textarea でも効く</label>
+<textarea data-ime-mode="katakana" rows="3" placeholder="CSS の ime-mode と違い要素種別を問わない"></textarea>
+
+<label>8. 隣接する制御欄の行き来</label>
+<input type="text" data-ime-mode="inactive" placeholder="半角英数">
+<input type="text" data-ime-mode="katakana" placeholder="全角カナ">
+<p class="note">Tab で往復してもちらつかず、それぞれのモードになること。</p>
+
+<label>9. 動的に追加された要素</label>
+<div id="slot"></div>
+<button id="add">入力欄を追加</button>
+<p class="note">focusin を document で拾っているので MutationObserver は不要。</p>
+
+<script>
+  document.getElementById('add').addEventListener('click', () => {
+    const i = document.createElement('input');
+    i.type = 'text';
+    i.setAttribute('data-ime-mode', 'half-katakana');
+    i.placeholder = '後から追加された欄 (half-katakana)';
+    document.getElementById('slot').append(i, document.createElement('br'));
+  });
+</script>
+</body>
+</html>
