@@ -66,6 +66,7 @@ function loadContent({ reply = 'ack', sendImpl, attr = 'hiragana', readyState = 
 
 function loadBackground({ respond } = {}) {
   let listener = null;
+  let startupHandler = null;
   const posted = [];
   // connect() の「port があれば作り直さない」ガード (background.js:19) を
   // 数えるためのカウンタ。オブジェクトに包むのは、listener 呼び出しの後でも
@@ -92,13 +93,14 @@ function loadBackground({ respond } = {}) {
     runtime: {
       connectNative: () => { connectStats.count++; return port; },
       onMessage: { addListener: (fn) => { listener = fn; } },
+      onStartup: { addListener: (fn) => { startupHandler = fn; } },
       lastError: null,
     },
   };
   const ctx = { chrome, setTimeout, clearTimeout, setInterval: () => 0, console, Promise };
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(BACKGROUND, 'utf8'), ctx);
-  return { listener, posted, connectStats };
+  return { listener, startupHandler, posted, connectStats };
 }
 
 const results = [];
@@ -432,6 +434,47 @@ function check(name, actual, expected) {
 
     await sleep(10);
     check('saved 保持中の prewarm は ping である (restore set ではない)', posted.map((m) => m.cmd), ['ping']);
+  }
+
+  // ---- background.js: onStartup による起動時の温め ------------------------
+  //
+  // 既存の prewarm は「属性を含む文書を開いた時点」で温めるので、対象欄が
+  // autofocus されているページではフォーカスと同じ瞬間になり利得がゼロになる。
+  // ブラウザの起動時に温めることで、ページより前に 1.2 秒を払い終える。
+  {
+    const { startupHandler, posted, connectStats } = loadBackground({
+      respond: (m) => (m.cmd === 'ping' ? { id: m.id, ok: true } : undefined),
+    });
+
+    // サービスワーカーは頻繁に起き直す。ここをトップレベルの即時実行に
+    // 書き換えると、起きるたびに PowerShell が 1 プロセス生まれる。
+    // このアサーションだけがそれを止めている。
+    check('background が onStartup にハンドラを登録する', typeof startupHandler, 'function');
+    check('onStartup の登録だけでは connectNative を呼ばない', connectStats.count, 0);
+
+    startupHandler();
+    await sleep(10);
+    check('onStartup の発火で connectNative を 1 回だけ呼ぶ', connectStats.count, 1);
+    // ping だけであること = ウィンドウ解決も IME 操作もしないこと。
+    // set が混じると、誰も要求していないのに IME を書き換えることになる。
+    check('onStartup が送るのは ping だけ', posted.map((m) => m.cmd), ['ping']);
+  }
+
+  // ---- background.js: onStartup の後もプロセスは増えない --------------------
+  //
+  // 起動時に温めたあと、対象ページを開くとページ単位 prewarm も飛ぶ。
+  // connect() のガード (background.js:19) が onStartup 経由でも効いていないと、
+  // ここで 2 プロセス目が立つ。
+  {
+    const { listener, startupHandler, connectStats } = loadBackground({
+      respond: (m) => (m.cmd === 'ping' ? { id: m.id, ok: true } : undefined),
+    });
+
+    startupHandler();
+    await sleep(10);
+    listener({ type: 'ime', prewarm: true }, {}, () => {});
+    await sleep(10);
+    check('onStartup の後のページ prewarm は connectNative を増やさない', connectStats.count, 1);
   }
 
   // ---- 結果 ----------------------------------------------------------------
