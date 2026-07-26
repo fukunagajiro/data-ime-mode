@@ -1,0 +1,262 @@
+// content.js / background.js の状態遷移を、最小限の DOM / chrome スタブ上で確認する。
+// 依存なし。  node test\content.test.js
+//
+// IME そのものは触らないので、Win32 側の確認は test-ime-*.ps1 と
+// test\test.html で別途行うこと。
+
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+
+const CONTENT = process.argv[2] || path.join(__dirname, '..', 'extension', 'content.js');
+const BACKGROUND = process.argv[3] || path.join(__dirname, '..', 'extension', 'background.js');
+
+// ブラウザは未処理の reject をログに出すだけで停止しない。挙動を合わせる。
+let unhandled = 0;
+process.on('unhandledRejection', () => { unhandled++; });
+
+function makeTarget(l) {
+  return {
+    addEventListener(t, f) { (l[t] ||= []).push(f); },
+    fire(t, e) { for (const f of (l[t] || [])) f(e); },
+  };
+}
+
+// data-ime-mode 属性だけを持つ要素のふり。attr が null なら属性なし。
+const el = (a) => ({ getAttribute: (n) => (n === 'data-ime-mode' && a != null ? a : null) });
+
+// sendMessage の返り方。MV3 の実機では、リスナが sendResponse を呼ばず true も
+// 返さないとポートが無応答で閉じ、届いているのに Promise が reject する。
+const REPLY = {
+  ack:   () => Promise.resolve({ ok: true }),
+  noack: () => Promise.reject(new Error('The message port closed before a response was received.')),
+  dead:  () => Promise.reject(new Error('Could not establish connection. Receiving end does not exist.')),
+  throw: () => { throw new Error('Extension context invalidated.'); },
+};
+
+function loadContent({ reply = 'ack', sendImpl } = {}) {
+  const sent = [];
+  const document = Object.assign(makeTarget({}), {
+    visibilityState: 'visible',
+    activeElement: el(null),
+    hasFocus: () => document._hasFocus,
+    _hasFocus: true,
+  });
+  const window = makeTarget({});
+  const chrome = {
+    runtime: {
+      sendMessage(m) { sent.push(m.mode); return (sendImpl || REPLY[reply])(m); },
+    },
+  };
+  const ctx = { document, window, chrome, setTimeout, clearTimeout, console };
+  vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync(CONTENT, 'utf8'), ctx);
+  return { document, window, sent };
+}
+
+const results = [];
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function check(name, actual, expected) {
+  const ok = JSON.stringify(actual) === JSON.stringify(expected);
+  results.push([name, ok, actual, expected]);
+}
+
+(async () => {
+  // ---- content.js: フォーカス遷移 ------------------------------------------
+
+  // 隣接する制御欄の行き来は 40ms のコアレス窓で 1 往復に畳まれる。
+  {
+    const t = loadContent();
+    t.document.fire('focusin', { target: el('hiragana') });
+    t.document.fire('focusout', {});
+    t.document.fire('focusin', { target: el('half-katakana') });
+    await sleep(80);
+    check('隣接欄の移動で復帰(null)を挟まない', t.sent, ['hiragana', 'half-katakana']);
+  }
+
+  // 制御対象でない場所へ抜けたら 40ms 後に復帰。
+  {
+    const t = loadContent();
+    t.document.fire('focusin', { target: el('katakana') });
+    t.document.fire('focusout', {});
+    await sleep(80);
+    check('離脱で 40ms 後に復帰', t.sent, ['katakana', null]);
+  }
+
+  // Alt+Tab: タイマーを待たず即座に返す。待つと切替先の IME が汚れる。
+  {
+    const t = loadContent();
+    t.document.fire('focusin', { target: el('hiragana') });
+    t.window.fire('blur');
+    check('window blur で即座に復帰', t.sent, ['hiragana', null]);
+
+    t.document.activeElement = el('hiragana');
+    t.window.fire('focus');
+    check('window focus で再適用', t.sent, ['hiragana', null, 'hiragana']);
+  }
+
+  // Chromium が focus と focusin の両方を出しても二重送信しない。
+  {
+    const t = loadContent();
+    t.document.fire('focusin', { target: el('hiragana') });
+    t.window.fire('blur');
+    t.document.activeElement = el('hiragana');
+    t.window.fire('focus');
+    t.document.fire('focusin', { target: el('hiragana') });
+    check('focus と focusin の二重発火を重複排除', t.sent, ['hiragana', null, 'hiragana']);
+  }
+
+  // Edge が前面でないのに再適用すると、ホストが hwnd 0 を別アプリに解決してしまう。
+  {
+    const t = loadContent();
+    t.document.fire('focusin', { target: el('hiragana') });
+    t.window.fire('blur');
+    t.document.activeElement = el('hiragana');
+    t.document._hasFocus = false;
+    t.document.fire('visibilitychange', {});
+    check('hasFocus() が false なら再適用しない', t.sent, ['hiragana', null]);
+  }
+
+  // タブ切替でも往復すること。
+  {
+    const t = loadContent();
+    t.document.fire('focusin', { target: el('katakana') });
+    t.document.visibilityState = 'hidden';
+    t.document.fire('visibilitychange', {});
+    t.document.activeElement = el('katakana');
+    t.document.visibilityState = 'visible';
+    t.document.fire('visibilitychange', {});
+    check('タブ非表示→再表示で復帰と再適用', t.sent, ['katakana', null, 'katakana']);
+  }
+
+  // 何もフォーカスされていない状態で戻ってきたら、解放したままにする。
+  {
+    const t = loadContent();
+    t.document.fire('focusin', { target: el('hiragana') });
+    t.window.fire('blur');
+    t.document.activeElement = el(null);
+    t.window.fire('focus');
+    check('フォーカスが無い状態で戻っても何も送らない', t.sent, ['hiragana', null]);
+  }
+
+  // 未知の値は属性なしと同じ扱い。大文字・前後の空白は正規化する。
+  {
+    const t = loadContent();
+    t.document.fire('focusin', { target: el('disabled') });
+    t.document.fire('focusin', { target: el(null) });
+    t.document.fire('focusin', { target: el('  HIRAGANA  ') });
+    t.document.fire('focusin', { target: el('constructor') });
+    check('未知の値は無視 / 大文字と空白は正規化', t.sent, ['hiragana', null]);
+  }
+
+  // ---- content.js: 送信が失敗したときの回復 --------------------------------
+  //
+  // 送信の失敗が「離脱時の復帰」を握り潰すと、IME が他アプリまで汚染されたまま
+  // 取り残される。これがこの拡張機能で最も避けたい壊れ方なので、reject の
+  // 種類を問わず復帰は必ず送られること。
+
+  for (const reply of ['noack', 'dead']) {
+    const t = loadContent({ reply });
+    t.document.fire('focusin', { target: el('hiragana') });
+    await sleep(10);            // reject が microtask で届く
+    t.window.fire('blur');
+    check(`送信が reject (${reply}) しても離脱時の復帰は送る`, t.sent, ['hiragana', null]);
+  }
+
+  {
+    const t = loadContent({ reply: 'throw' });
+    t.document.fire('focusin', { target: el('hiragana') });
+    t.window.fire('blur');
+    check('送信が同期 throw しても離脱時の復帰は送る', t.sent, ['hiragana', null]);
+  }
+
+  // 失敗した後は「適用済み」の記憶を捨て、同じモードでも再送できること。
+  {
+    let fail = true;
+    const t = loadContent({ sendImpl: () => (fail ? REPLY.dead() : REPLY.ack()) });
+    t.document.fire('focusin', { target: el('hiragana') });
+    await sleep(10);
+    fail = false;
+    t.document.fire('focusin', { target: el('hiragana') });
+    check('失敗の後に同じモードを再送できる', t.sent, ['hiragana', 'hiragana']);
+  }
+
+  // 正常時は重複排除が効いていること（上の回復が緩すぎないことの裏取り）。
+  {
+    const t = loadContent();
+    t.document.fire('focusin', { target: el('hiragana') });
+    await sleep(10);
+    t.document.fire('focusin', { target: el('hiragana') });
+    check('成功時は同じモードを再送しない', t.sent, ['hiragana']);
+  }
+
+  // 遅れて届いた失敗が、その後に適用した新しいモードを消してはいけない。
+  {
+    let rejectFirst;
+    let n = 0;
+    const t = loadContent({
+      sendImpl: () => (++n === 1 ? new Promise((_, rej) => { rejectFirst = rej; }) : REPLY.ack()),
+    });
+    t.document.fire('focusin', { target: el('hiragana') });
+    t.document.fire('focusin', { target: el('katakana') });
+    rejectFirst(new Error('late'));
+    await sleep(10);
+    t.document.fire('focusin', { target: el('katakana') });
+    check('遅れて届いた失敗が新しい状態を消さない', t.sent, ['hiragana', 'katakana']);
+  }
+
+  // ---- background.js: 受領の応答 -------------------------------------------
+  //
+  // 応答しないとポートが無応答で閉じ、content 側の Promise が reject する。
+  // 「届いた」と「届かなかった」が区別できなくなる根本原因なので、ここで止める。
+  {
+    let listener = null;
+    const posted = [];
+    const port = {
+      onMessage: { addListener() {} },
+      onDisconnect: { addListener() {} },
+      postMessage(m) { posted.push(m); },
+    };
+    const chrome = {
+      runtime: {
+        connectNative: () => port,
+        onMessage: { addListener: (fn) => { listener = fn; } },
+        lastError: null,
+      },
+    };
+    const ctx = { chrome, setTimeout, clearTimeout, setInterval: () => 0, console, Promise };
+    vm.createContext(ctx);
+    vm.runInContext(fs.readFileSync(BACKGROUND, 'utf8'), ctx);
+
+    let responded = false;
+    listener(
+      { type: 'ime', mode: 'hiragana', spec: { open: 1, conv: 'hiragana' } },
+      {},
+      () => { responded = true; },
+    );
+    check('background が受領を同期的に応答する', responded, true);
+
+    let respondedOnRelease = false;
+    listener({ type: 'ime', mode: null, spec: null }, {}, () => { respondedOnRelease = true; });
+    check('background が復帰要求にも応答する', respondedOnRelease, true);
+
+    await sleep(10);
+    check('background がホストへ set を送る', posted.length > 0 && posted[0].cmd, 'set');
+  }
+
+  // ---- 結果 ----------------------------------------------------------------
+
+  let bad = 0;
+  for (const [name, ok, actual, expected] of results) {
+    console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}`);
+    if (!ok) {
+      bad++;
+      console.log(`        期待: ${JSON.stringify(expected)}`);
+      console.log(`        実際: ${JSON.stringify(actual)}`);
+    }
+  }
+  if (unhandled) console.log(`\n未処理の reject: ${unhandled} 件`);
+  console.log(`\n${results.length - bad}/${results.length} passed`);
+  process.exit(bad || unhandled ? 1 : 0);
+})();

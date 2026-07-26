@@ -91,9 +91,13 @@ function enqueue(fn) {
   return queue;
 }
 
-chrome.runtime.onMessage.addListener((msg) => {
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || msg.type !== 'ime') return;
   enqueue(() => (msg.spec ? acquire(msg.spec) : release()));
+  // 受領だけを即座に返す。応答しないとポートが無応答のまま閉じ、送信側の
+  // Promise が reject するため、content.js から「届いた」と「届かなかった」が
+  // 区別できなくなる。実際の適用は queue 上で進むので完了は待たない。
+  sendResponse({ ok: true });
 });
 
 // An open native port keeps the service worker alive, but a periodic message

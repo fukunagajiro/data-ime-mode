@@ -53,6 +53,12 @@
 <button id="add">入力欄を追加</button>
 <p class="note">focusin を document で拾っているので MutationObserver は不要。</p>
 
+<label>10. 他アプリへの往復</label>
+<input type="text" data-ime-mode="hiragana" placeholder="あ の状態にしてから Alt+Tab">
+<p class="note">この欄にフォーカスしたまま Alt+Tab で他アプリへ移ると、そちらの IME は
+元のまま（＝拡張機能は手を出さない）。Edge に戻ると再び <code>あ</code> になること。
+別のタブに切り替えて戻す操作でも同じ。</p>
+
 <script>
   document.getElementById('add').addEventListener('click', () => {
     const i = document.createElement('input');

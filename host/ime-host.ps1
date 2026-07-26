@@ -7,6 +7,7 @@ $ErrorActionPreference = 'Stop'
 
 Add-Type @"
 using System;
+using System.Text;
 using System.Runtime.InteropServices;
 public class ImeNative {
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
@@ -14,6 +15,12 @@ public class ImeNative {
     [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(
         IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam,
         uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+
+    // 診断用: 書き込み先が本当に Edge なのかを記録するため。
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(
+        IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(
+        IntPtr hWnd, StringBuilder lpString, int nMaxCount);
 }
 "@
 
@@ -41,6 +48,41 @@ $CONV_BITS = @{
 
 $stdin  = [Console]::OpenStandardInput()
 $stdout = [Console]::OpenStandardOutput()
+
+# 診断ログ。host\debug.on を置くと有効になる。プロセスを起動するのは Edge なので
+# 環境変数では切り替えられない。stdout はプロトコル専用なので必ずファイルへ書く。
+$script:logPath = $null
+if (Test-Path (Join-Path $PSScriptRoot 'debug.on')) {
+    $script:logPath = Join-Path $PSScriptRoot 'debug.log'
+}
+
+function Write-DebugLog([string]$msg) {
+    if ($null -eq $script:logPath) { return }
+    try {
+        [IO.File]::AppendAllText(
+            $script:logPath,
+            ('{0:HH:mm:ss.fff}  {1}{2}' -f (Get-Date), $msg, [Environment]::NewLine),
+            [Text.Encoding]::UTF8)
+    } catch { }
+}
+
+Write-DebugLog '--- host 起動 ---'
+
+# 診断専用。ウィンドウがどのアプリのものかを人間が読める形にする。
+# 「Edge に書いたつもりが別アプリだった」を一目で分かるようにするため。
+function Get-WindowLabel([IntPtr]$hWnd) {
+    if ($hWnd -eq [IntPtr]::Zero) { return '(なし)' }
+    try {
+        $pid32 = 0
+        [void][ImeNative]::GetWindowThreadProcessId($hWnd, [ref]$pid32)
+        $name = try { (Get-Process -Id $pid32 -ErrorAction Stop).ProcessName } catch { "pid $pid32" }
+        $sb = New-Object Text.StringBuilder 256
+        [void][ImeNative]::GetWindowTextW($hWnd, $sb, $sb.Capacity)
+        $title = $sb.ToString()
+        if ($title.Length -gt 60) { $title = $title.Substring(0, 60) + '…' }
+        return "$name `"$title`""
+    } catch { return '(取得失敗)' }
+}
 
 # Safety net: whatever we last changed, put it back when the port dies.
 $script:lastChange = $null   # @{ hwnd = <IntPtr>; open = <int>; conv = <int> }
@@ -82,17 +124,44 @@ function Resolve-ImeWnd([int64]$hwnd) {
 
 function Invoke-ImeControl([IntPtr]$imeWnd, [int]$cmd, [int]$value) {
     $result = [IntPtr]::Zero
+    $sw = [Diagnostics.Stopwatch]::StartNew()
     $ok = [ImeNative]::SendMessageTimeout(
         $imeWnd, $WM_IME_CONTROL, [IntPtr]$cmd, [IntPtr]$value,
         $SMTO_ABORTIFHUNG, $SEND_TIMEOUT_MS, [ref]$result)
-    if ($ok -eq [IntPtr]::Zero) { return $null }   # timed out or window is hung
+    $sw.Stop()
+    if ($ok -eq [IntPtr]::Zero) {   # timed out or window is hung
+        Write-DebugLog ('    IMC 0x{0:X2} <- 0x{1:X4}  失敗/タイムアウト ({2}ms, 上限 {3}ms)' `
+            -f $cmd, $value, $sw.ElapsedMilliseconds, $SEND_TIMEOUT_MS)
+        return $null
+    }
+    Write-DebugLog ('    IMC 0x{0:X2} <- 0x{1:X4}  => 0x{2:X4} ({3}ms)' `
+        -f $cmd, $value, [int]$result, $sw.ElapsedMilliseconds)
     return [int]$result
 }
 
-# Rewrites only the bits we own, leaving the user's ROMAN setting etc. alone.
-function Set-ConversionBits([IntPtr]$imeWnd, [int]$current, [int]$bits) {
-    $target = ($current -band (-bnot $CONV_MASK)) -bor ($bits -band $CONV_MASK)
-    if ($target -eq $current) { return $true }
+# 変換モードの書き込みは 2 種類あり、扱いが違う。
+#
+#   モード適用 ($exact = $false)
+#     自分の 3 ビットだけを書き換え、非マスクビット（ROMAN = ローマ字入力 /
+#     かな入力の別など）は現在値から引き継ぐ。ユーザー自身の設定を壊さないため。
+#
+#   状態の復帰 ($exact = $true)
+#     捕獲した値をそのまま書き戻す。マスクに通してはいけない。適用中に非マスク
+#     ビットが変わっていると、現在値側から引き継いだ値で上書きしてしまい、
+#     ROMAN が落ちてローマ字入力からかな入力へ勝手に切り替わる。
+function Set-ConversionBits([IntPtr]$imeWnd, [int]$current, [int]$value, [bool]$exact = $false) {
+    $target = if ($exact) {
+        $value
+    } else {
+        ($current -band (-bnot $CONV_MASK)) -bor ($value -band $CONV_MASK)
+    }
+    $kind = if ($exact) { '復帰' } else { '適用' }
+    if ($target -eq $current) {
+        Write-DebugLog ('    conv({0}): current=0x{1:X4} 要求=0x{2:X4} target=0x{3:X4} → 同値のため書き込みスキップ' `
+            -f $kind, $current, $value, $target)
+        return $true
+    }
+    Write-DebugLog ('    conv({0}): current=0x{1:X4} 要求=0x{2:X4} target=0x{3:X4}' -f $kind, $current, $value, $target)
     return $null -ne (Invoke-ImeControl $imeWnd $IMC_SETCONVERSIONMODE $target)
 }
 
@@ -101,12 +170,23 @@ function Invoke-ImeRequest($req) {
 
     if ($cmd -eq 'ping') { return @{ ok = $true } }
 
+    # ログ無効時に ConvertTo-Json / Get-Process を走らせないよう、引数の組み立てごと囲う。
+    $logging = $null -ne $script:logPath
+    if ($logging) { Write-DebugLog ('req  ' + ($req | ConvertTo-Json -Compress)) }
+
     $hwndIn = 0
     if ($null -ne $req.hwnd) { $hwndIn = [int64]$req.hwnd }
     $w = Resolve-ImeWnd $hwndIn
 
     if ($w.ime -eq [IntPtr]::Zero) {
+        Write-DebugLog '  IME ウィンドウを取得できず'
         return @{ ok = $false; error = 'no IME window for target' }
+    }
+    if ($logging) {
+        # hwnd 0 はフォアグラウンドに解決される。ここが Edge でなければ、
+        # 別アプリの IME を書き換えていることになる。
+        Write-DebugLog ('  target hwnd=0x{0:X} ime=0x{1:X} (要求 hwnd={2}) → {3}' -f
+            [int64]$w.target, [int64]$w.ime, $hwndIn, (Get-WindowLabel $w.target))
     }
 
     $curOpen = Invoke-ImeControl $w.ime $IMC_GETOPENSTATUS 0
@@ -122,26 +202,31 @@ function Invoke-ImeRequest($req) {
 
     $open = [int]$req.open
 
-    # Resolve the requested conversion bits: symbolic name from the extension,
-    # or a raw value when restoring a state we captured earlier.
-    $bits = $null
+    # Resolve the requested conversion mode: a symbolic name from the extension
+    # (apply), or a raw value when restoring a state we captured earlier.
+    # どちらで来たかで書き方が変わるので取り違えないこと。
+    $convValue = $null
+    $convExact = $false
     if ($null -ne $req.conv) {
         $name = [string]$req.conv
         if (-not $CONV_BITS.ContainsKey($name)) {
             return @{ ok = $false; error = "unknown conv: $name" }
         }
-        $bits = [int]$CONV_BITS[$name]
+        $convValue = [int]$CONV_BITS[$name]
     } elseif ($null -ne $req.convRaw) {
-        $bits = [int]$req.convRaw
+        $convValue = [int]$req.convRaw
+        $convExact = $true
     }
 
     # Conversion-mode writes only stick while the IME is open, so sequence the
     # two writes around that: open first when turning on, conv first when turning off.
     if ($open -eq 1) {
         if ($curOpen -ne 1) { Invoke-ImeControl $w.ime $IMC_SETOPENSTATUS 1 | Out-Null }
-        if ($null -ne $bits) { Set-ConversionBits $w.ime $curConv $bits | Out-Null }
+        if ($null -ne $convValue) { Set-ConversionBits $w.ime $curConv $convValue $convExact | Out-Null }
     } else {
-        if ($null -ne $bits -and $curOpen -eq 1) { Set-ConversionBits $w.ime $curConv $bits | Out-Null }
+        if ($null -ne $convValue -and $curOpen -eq 1) {
+            Set-ConversionBits $w.ime $curConv $convValue $convExact | Out-Null
+        }
         if ($curOpen -ne 0) { Invoke-ImeControl $w.ime $IMC_SETOPENSTATUS 0 | Out-Null }
     }
 
@@ -149,6 +234,22 @@ function Invoke-ImeRequest($req) {
         $script:lastChange = $null
     } elseif ($null -eq $script:lastChange) {
         $script:lastChange = @{ hwnd = $w.target; open = $curOpen; conv = $curConv }
+    }
+
+    # 書いた結果が実際に残っているかを読み直す。書き込みが受理されたのに
+    # 反映されない（TSF 側で捨てられる）のか、そもそも書いていないのかを分ける。
+    # 直後と少し待った後の 2 回読むのは、TSF が非同期に反映する場合に
+    # 「拒否された」と誤読しないため。参照スクリプトが 1.2 秒待つのと同じ理由。
+    if ($null -ne $script:logPath) {
+        $afterOpen = Invoke-ImeControl $w.ime $IMC_GETOPENSTATUS 0
+        $afterConv = Invoke-ImeControl $w.ime $IMC_GETCONVERSIONMODE 0
+        Write-DebugLog ('  結果(直後): open {0} -> {1} / conv 0x{2:X4} -> 0x{3:X4}' -f
+            $curOpen, $afterOpen, $curConv, $afterConv)
+
+        Start-Sleep -Milliseconds 250
+        $lateOpen = Invoke-ImeControl $w.ime $IMC_GETOPENSTATUS 0
+        $lateConv = Invoke-ImeControl $w.ime $IMC_GETCONVERSIONMODE 0
+        Write-DebugLog ('  結果(250ms後): open {0} / conv 0x{1:X4}' -f $lateOpen, $lateConv)
     }
 
     return @{ ok = $true; hwnd = [int64]$w.target; previous = $curOpen; previousConv = $curConv }
@@ -178,7 +279,8 @@ finally {
         $ime = [ImeNative]::ImmGetDefaultIMEWnd($script:lastChange.hwnd)
         if ($ime -ne [IntPtr]::Zero) {
             $now = Invoke-ImeControl $ime $IMC_GETCONVERSIONMODE 0
-            if ($null -ne $now) { Set-ConversionBits $ime $now $script:lastChange.conv | Out-Null }
+            # 復帰なので exact。マスクに通すと ROMAN などが落ちる。
+            if ($null -ne $now) { Set-ConversionBits $ime $now $script:lastChange.conv $true | Out-Null }
             Invoke-ImeControl $ime $IMC_SETOPENSTATUS $script:lastChange.open | Out-Null
         }
     }
