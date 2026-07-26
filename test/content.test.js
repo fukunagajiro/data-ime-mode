@@ -54,6 +54,38 @@ function loadContent({ reply = 'ack', sendImpl } = {}) {
   return { document, window, sent };
 }
 
+function loadBackground({ respond } = {}) {
+  let listener = null;
+  const posted = [];
+  let onMessageHandler = null;
+  const port = {
+    onMessage: { addListener(fn) { onMessageHandler = fn; } },
+    onDisconnect: { addListener() {} },
+    postMessage(m) {
+      posted.push(m);
+      // 応答ハンドラが登録されていれば非同期で応答を返す
+      if (respond && onMessageHandler) {
+        const response = respond(m);
+        if (response !== undefined) {
+          // microtask として実行し、queue が処理できるようにする
+          Promise.resolve().then(() => onMessageHandler(response));
+        }
+      }
+    },
+  };
+  const chrome = {
+    runtime: {
+      connectNative: () => port,
+      onMessage: { addListener: (fn) => { listener = fn; } },
+      lastError: null,
+    },
+  };
+  const ctx = { chrome, setTimeout, clearTimeout, setInterval: () => 0, console, Promise };
+  vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync(BACKGROUND, 'utf8'), ctx);
+  return { listener, posted };
+}
+
 const results = [];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -211,23 +243,7 @@ function check(name, actual, expected) {
   // 応答しないとポートが無応答で閉じ、content 側の Promise が reject する。
   // 「届いた」と「届かなかった」が区別できなくなる根本原因なので、ここで止める。
   {
-    let listener = null;
-    const posted = [];
-    const port = {
-      onMessage: { addListener() {} },
-      onDisconnect: { addListener() {} },
-      postMessage(m) { posted.push(m); },
-    };
-    const chrome = {
-      runtime: {
-        connectNative: () => port,
-        onMessage: { addListener: (fn) => { listener = fn; } },
-        lastError: null,
-      },
-    };
-    const ctx = { chrome, setTimeout, clearTimeout, setInterval: () => 0, console, Promise };
-    vm.createContext(ctx);
-    vm.runInContext(fs.readFileSync(BACKGROUND, 'utf8'), ctx);
+    const { listener, posted } = loadBackground();
 
     let responded = false;
     listener(
@@ -248,29 +264,49 @@ function check(name, actual, expected) {
   // ---- background.js: prewarm を独立したコンテキストでテスト ----
   // (acquire/release で queue がブロックされないように)
   {
-    let listener = null;
-    const posted = [];
-    const port = {
-      onMessage: { addListener() {} },
-      onDisconnect: { addListener() {} },
-      postMessage(m) { posted.push(m); },
-    };
-    const chrome = {
-      runtime: {
-        connectNative: () => port,
-        onMessage: { addListener: (fn) => { listener = fn; } },
-        lastError: null,
-      },
-    };
-    const ctx = { chrome, setTimeout, clearTimeout, setInterval: () => 0, console, Promise };
-    vm.createContext(ctx);
-    vm.runInContext(fs.readFileSync(BACKGROUND, 'utf8'), ctx);
+    const { listener, posted } = loadBackground();
 
     let respondedPrewarm = false;
     listener({ type: 'ime', prewarm: true }, {}, () => { respondedPrewarm = true; });
-    check('background が prewarm に応答する (新コンテキスト)', respondedPrewarm, true);
+    check('background が prewarm に応答する', respondedPrewarm, true);
     await sleep(10);
     check('background が prewarm を ping にする', posted.map((m) => m.cmd), ['ping']);
+  }
+
+  // ---- background.js: 危険な経路: saved を保持中に prewarm が届く場合 ----
+  // ポートが応答を返すので acquire が完了し saved が確立される。
+  // その後 prewarm を送ると、修正前はここで release() が走って restore set が飛ぶ。
+  // 修正後は prewarm の分岐で ping になっているはず。
+  {
+    const { listener, posted } = loadBackground({
+      respond: (m) => {
+        if (m.cmd === 'set') {
+          // acquire/release の set に応答。hwnd と previous を返す。
+          return { id: m.id, ok: true, hwnd: 1, previous: 0, previousConv: 0x19 };
+        }
+      },
+    });
+
+    // spec あり: acquire を実行して saved を確立する
+    let respondedAcquire = false;
+    listener(
+      { type: 'ime', mode: 'hiragana', spec: { open: 1, conv: 'hiragana' } },
+      {},
+      () => { respondedAcquire = true; },
+    );
+    check('background が acquire に応答する', respondedAcquire, true);
+
+    // queue に set が投稿されるのを待つ
+    await sleep(50);
+
+    // saved が確立された状態で prewarm を送る
+    posted.length = 0;
+    let respondedPrewarm = false;
+    listener({ type: 'ime', prewarm: true }, {}, () => { respondedPrewarm = true; });
+    check('background が saved 保持中の prewarm に応答する', respondedPrewarm, true);
+
+    await sleep(10);
+    check('saved 保持中の prewarm は ping である (restore set ではない)', posted.map((m) => m.cmd), ['ping']);
   }
 
   // ---- 結果 ----------------------------------------------------------------
