@@ -271,6 +271,11 @@ try {
     # 状態を変えてから確かめる。
     Set-State $ime 1 0x001B
     $baseline = Get-State $ime
+    # baseline が afterPing と別の値であることに、この後の判定は依存している
+    # (下のコメント参照)。ここで意図どおりの値を作れているか確かめておかないと、
+    # baseline が想定と違っていても afterPing と偶然食い違うだけで
+    # テストが非自明なまま通ってしまう。
+    Check 'ping: 前提として baseline を作れている' "$($baseline.open)/$(Hex $baseline.conv)" "1/$(Hex 0x001B)"
     $pingProc = Start-ImeHost $hostCopy
     $r = Invoke-Host $pingProc @{ cmd = 'ping'; id = 200 }
     Check 'ping: 応答する' "$($r.ok)" 'True'

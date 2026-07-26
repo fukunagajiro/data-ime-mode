@@ -36,6 +36,9 @@ const REPLY = {
 
 function loadContent({ reply = 'ack', sendImpl, attr = 'hiragana', readyState = 'loading' } = {}) {
   const sent = [];
+  // sent は 'prewarm' や mode 名の文字列に潰しているため、type フィールドが
+  // 抜けても検知できない。生のメッセージ形をここに残し、別途ピン留めする。
+  const sentRaw = [];
   const document = Object.assign(makeTarget({}), {
     visibilityState: 'visible',
     activeElement: el(null),
@@ -48,18 +51,27 @@ function loadContent({ reply = 'ack', sendImpl, attr = 'hiragana', readyState = 
   const window = makeTarget({});
   const chrome = {
     runtime: {
-      sendMessage(m) { sent.push(m.prewarm ? 'prewarm' : m.mode); return (sendImpl || REPLY[reply])(m); },
+      sendMessage(m) {
+        sent.push(m.prewarm ? 'prewarm' : m.mode);
+        sentRaw.push(m);
+        return (sendImpl || REPLY[reply])(m);
+      },
     },
   };
   const ctx = { document, window, chrome, setTimeout, clearTimeout, console };
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(CONTENT, 'utf8'), ctx);
-  return { document, window, sent };
+  return { document, window, sent, sentRaw };
 }
 
 function loadBackground({ respond } = {}) {
   let listener = null;
   const posted = [];
+  // connect() の「port があれば作り直さない」ガード (background.js:19) を
+  // 数えるためのカウンタ。オブジェクトに包むのは、listener 呼び出しの後でも
+  // 同じ参照から最新値を読めるようにするため（プリミティブ値だと呼び出し
+  // 時点のコピーしか返せない）。
+  const connectStats = { count: 0 };
   let onMessageHandler = null;
   const port = {
     onMessage: { addListener(fn) { onMessageHandler = fn; } },
@@ -78,7 +90,7 @@ function loadBackground({ respond } = {}) {
   };
   const chrome = {
     runtime: {
-      connectNative: () => port,
+      connectNative: () => { connectStats.count++; return port; },
       onMessage: { addListener: (fn) => { listener = fn; } },
       lastError: null,
     },
@@ -86,7 +98,7 @@ function loadBackground({ respond } = {}) {
   const ctx = { chrome, setTimeout, clearTimeout, setInterval: () => 0, console, Promise };
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(BACKGROUND, 'utf8'), ctx);
-  return { listener, posted };
+  return { listener, posted, connectStats };
 }
 
 const results = [];
@@ -194,8 +206,33 @@ function check(name, actual, expected) {
     const t = loadContent();
     t.document.fire('DOMContentLoaded', {});
     check('属性のある文書は prewarm を送る', t.sent, ['prewarm']);
+
+    // 本番では DOMContentLoaded は { once: true } で登録され、readyState が
+    // 'complete' のときの分岐 (else prewarm()) とは互いに排他なので、
+    // prewarmSent の出番 (2 回目の呼び出しを弾く) は本来来ない。ここで
+    // 2 回目を発火しているのは、このスタブの addEventListener が once を
+    // 無視して律儀に再度呼ぶため。つまりこの check が確かめているのは
+    // 「本番で 2 通送られかけている」ことではなく、prewarmSent という
+    // 防御そのものが機能していること。
     t.document.fire('DOMContentLoaded', {});
-    check('prewarm は文書あたり 1 通だけ', t.sent, ['prewarm']);
+    check('prewarmSent フラグ: 想定外の再呼び出しでも送り直さない (once を無視するスタブ経由)', t.sent, ['prewarm']);
+  }
+
+  // sent は 'prewarm' や mode 名に潰しているため、type: 'ime' が抜けても
+  // このテストと background の suite（自前の literal を組む）はどちらも
+  // 気づけない。extension/background.js:95 の `msg.type !== 'ime'` ガードは
+  // 生のメッセージ形を見て初めて壊れたことが分かるので、ここでピン留めする。
+  {
+    const t = loadContent();
+    t.document.fire('DOMContentLoaded', {});
+    check('prewarm メッセージの形: { type: "ime", prewarm: true }', t.sentRaw[0], { type: 'ime', prewarm: true });
+
+    t.document.fire('focusin', { target: el('hiragana') });
+    check(
+      '適用メッセージの形: { type: "ime", mode, spec }',
+      t.sentRaw[1],
+      { type: 'ime', mode: 'hiragana', spec: { open: 1, conv: 'hiragana' } },
+    );
   }
 
   // 属性を使っていないページで PowerShell を起動させない。この性質が崩れると、
@@ -296,6 +333,34 @@ function check(name, actual, expected) {
     await sleep(10);
     t.document.fire('focusin', { target: el('katakana') });
     check('遅れて届いた失敗が新しい状態を消さない', t.sent, ['hiragana', 'katakana']);
+  }
+
+  // ---- background.js: connect() の単一プロセス化ガード ----------------------
+  //
+  // extension/background.js:19 の `if (port) return port;` だけが、ナビゲーション
+  // のたびに（しかもフレームごとに）PowerShell を 1 プロセスずつ起動するのを
+  // 防いでいる。README は「プロセスが起動するのは最初の 1 回だけで、2 回目
+  // 以降は ping の往復（~1ms）で終わる」と約束しているので、ここが崩れると
+  // ドキュメント違反になる上、prewarm 導入前は 1 セッションに 1 回しか
+  // connect() を通らなかったのが、今は属性を持つページを開くたび（全フレーム）
+  // に通るようになっている。
+  {
+    // モジュールを読み込んだだけでは、誰も connect() を呼ばない。
+    const { connectStats } = loadBackground();
+    check('background 読み込みだけでは connectNative を呼ばない', connectStats.count, 0);
+  }
+  {
+    // queue は直列実行なので、1 通目の call() が解決しないと 2 通目の
+    // connect() は走らない。応答を返さないと 1 通目は 3 秒のタイムアウト
+    // まで解決しないため、実機同様にすぐ ping 応答を返す必要がある。
+    const { listener, connectStats } = loadBackground({
+      respond: (m) => (m.cmd === 'ping' ? { id: m.id, ok: true } : undefined),
+    });
+    listener({ type: 'ime', prewarm: true }, {}, () => {});
+    await sleep(10);
+    listener({ type: 'ime', prewarm: true }, {}, () => {});
+    await sleep(10);
+    check('prewarm を 2 回送っても connectNative は 1 回だけ (単一プロセス化ガード)', connectStats.count, 1);
   }
 
   // ---- background.js: 受領の応答 -------------------------------------------
