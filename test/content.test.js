@@ -221,14 +221,23 @@ function check(name, actual, expected) {
   }
 
   // prewarm の失敗で forget() を呼ぶと currentMode が UNKNOWN になり、同じモードが
-  // 二重に送られる。prewarm の失敗は捨てるだけであることの裏取り。
+  // 二重に送られる。prewarm の失敗は捨てるだけであることの裏取り。prewarm が応答
+  // する前にユーザーが欄へフォーカスした場合をシミュレートする。
   {
+    let rejectPrewarm;
     let n = 0;
-    const t = loadContent({ sendImpl: () => (++n === 1 ? REPLY.dead() : REPLY.ack()) });
+    const t = loadContent({
+      sendImpl: () => (++n === 1 ? new Promise((_, rej) => { rejectPrewarm = rej; }) : REPLY.ack()),
+    });
     t.document.fire('DOMContentLoaded', {});
-    await sleep(10);
+    // prewarm は送られたが、まだ応答しない状態
     t.document.fire('focusin', { target: el('hiragana') });
     await sleep(10);
+    // ここで prewarm の失敗が届く。currentMode は 'hiragana' で上書きされている。
+    rejectPrewarm(new Error('late'));
+    await sleep(10);
+    // 同じモードで再度フォーカスしても、forget() が呼ばれていなければ送らない。
+    // forget() が呼ばれていれば currentMode が UNKNOWN になり、ここで再送される。
     t.document.fire('focusin', { target: el('hiragana') });
     check('prewarm が失敗しても適用は 1 回だけ', t.sent, ['prewarm', 'hiragana']);
   }
