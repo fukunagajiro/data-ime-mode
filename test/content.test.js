@@ -34,18 +34,21 @@ const REPLY = {
   throw: () => { throw new Error('Extension context invalidated.'); },
 };
 
-function loadContent({ reply = 'ack', sendImpl } = {}) {
+function loadContent({ reply = 'ack', sendImpl, attr = 'hiragana', readyState = 'loading' } = {}) {
   const sent = [];
   const document = Object.assign(makeTarget({}), {
     visibilityState: 'visible',
     activeElement: el(null),
     hasFocus: () => document._hasFocus,
     _hasFocus: true,
+    readyState,
+    // prewarm の判定は属性の存在だけを見る。値の妥当性は modeOf() の仕事。
+    querySelector: (sel) => (attr != null && sel === '[data-ime-mode]' ? el(attr) : null),
   });
   const window = makeTarget({});
   const chrome = {
     runtime: {
-      sendMessage(m) { sent.push(m.mode); return (sendImpl || REPLY[reply])(m); },
+      sendMessage(m) { sent.push(m.prewarm ? 'prewarm' : m.mode); return (sendImpl || REPLY[reply])(m); },
     },
   };
   const ctx = { document, window, chrome, setTimeout, clearTimeout, console };
@@ -180,6 +183,54 @@ function check(name, actual, expected) {
     t.document.fire('focusin', { target: el('  HIRAGANA  ') });
     t.document.fire('focusin', { target: el('constructor') });
     check('未知の値は無視 / 大文字と空白は正規化', t.sent, ['hiragana', null]);
+  }
+
+  // ---- content.js: 事前起動 (prewarm) ----------------------------------------
+  //
+  // ホストの PowerShell 起動は実測 1.2 秒かかる。フォーカスしてから払うと
+  // 体感の遅れになるので、対象欄を持つ文書を開いた時点で温めておく。
+
+  {
+    const t = loadContent();
+    t.document.fire('DOMContentLoaded', {});
+    check('属性のある文書は prewarm を送る', t.sent, ['prewarm']);
+    t.document.fire('DOMContentLoaded', {});
+    check('prewarm は文書あたり 1 通だけ', t.sent, ['prewarm']);
+  }
+
+  // 属性を使っていないページで PowerShell を起動させない。この性質が崩れると、
+  // 拡張機能を入れているだけであらゆるページでプロセスが常駐する。
+  {
+    const t = loadContent({ attr: null });
+    t.document.fire('DOMContentLoaded', {});
+    check('属性が無い文書は prewarm を送らない', t.sent, []);
+  }
+
+  // content script の実行が読み込み後になった場合も温める。
+  {
+    const t = loadContent({ readyState: 'complete' });
+    check('読み込み済みの文書では即座に prewarm', t.sent, ['prewarm']);
+  }
+
+  // prewarm は適用ではないので currentMode を汚さない。
+  {
+    const t = loadContent();
+    t.document.fire('DOMContentLoaded', {});
+    t.document.fire('focusin', { target: el('hiragana') });
+    check('prewarm の後も適用は送られる', t.sent, ['prewarm', 'hiragana']);
+  }
+
+  // prewarm の失敗で forget() を呼ぶと currentMode が UNKNOWN になり、同じモードが
+  // 二重に送られる。prewarm の失敗は捨てるだけであることの裏取り。
+  {
+    let n = 0;
+    const t = loadContent({ sendImpl: () => (++n === 1 ? REPLY.dead() : REPLY.ack()) });
+    t.document.fire('DOMContentLoaded', {});
+    await sleep(10);
+    t.document.fire('focusin', { target: el('hiragana') });
+    await sleep(10);
+    t.document.fire('focusin', { target: el('hiragana') });
+    check('prewarm が失敗しても適用は 1 回だけ', t.sent, ['prewarm', 'hiragana']);
   }
 
   // ---- content.js: 送信が失敗したときの回復 --------------------------------
