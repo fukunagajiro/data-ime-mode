@@ -262,20 +262,31 @@ try {
     Check 'ポート断: conv が元に戻る' (Hex $now.conv) (Hex $BASE)
 
     # --- ping は IME に触らない -----------------------------------------------
-    # prewarm は ping を送るだけ。ここで lastChange が設定されると、ポートが
-    # 切れたときに「元へ戻す」処理が走り、ユーザー自身が選んだ状態を
-    # prewarm が書き換えてしまう。別プロセスを起こして確かめる。
+    # prewarm は ping を送るだけ。危険なのは ping の直後からポートが切れるまでの
+    # 間に、ユーザー自身が IME を切り替えるケース。ここで ping が lastChange を
+    # 記録してしまうと、ポート断時の「元へ戻す」処理がユーザーの変更を
+    # prewarm 実行前の状態へ勝手に巻き戻してしまう。単に無変化を保つだけでは
+    # この壊れ方を検出できない（巻き戻し先と現在値が同値だと書き込みが
+    # スキップされ、区別がつかない）ので、ping の後でユーザー操作を模して
+    # 状態を変えてから確かめる。
     Set-State $ime 1 0x001B
     $baseline = Get-State $ime
     $pingProc = Start-ImeHost $hostCopy
     $r = Invoke-Host $pingProc @{ cmd = 'ping'; id = 200 }
     Check 'ping: 応答する' "$($r.ok)" 'True'
+
+    # ping の直後、ユーザー自身が IME を切り替えたことを模す。baseline とは
+    # open・conv とも異なる値にして、巻き戻り先の baseline と区別できるようにする。
+    Set-State $ime 0 0x0009
+    $afterPing = Get-State $ime
+    Check 'ping のみ: 前提として baseline と異なる状態を作れている' "$($afterPing.open)/$(Hex $afterPing.conv)" "0/$(Hex 0x0009)"
+
     $pingProc.StandardInput.Close()
     if (-not $pingProc.WaitForExit(8000)) { throw 'ping だけのホストが終了しない' }
     Start-Sleep -Milliseconds $SETTLE_MS
     $now = Get-State $ime
-    Check 'ping のみ: ポート断でも open が変わらない' $now.open $baseline.open
-    Check 'ping のみ: ポート断でも conv が変わらない' (Hex $now.conv) (Hex $baseline.conv)
+    Check 'ping のみ: ポート断でユーザーの変更が巻き戻らない (open)' $now.open $afterPing.open
+    Check 'ping のみ: ポート断でユーザーの変更が巻き戻らない (conv)' (Hex $now.conv) (Hex $afterPing.conv)
 }
 finally {
     if ($null -ne $pingProc -and -not $pingProc.HasExited) {
