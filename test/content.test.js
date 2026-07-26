@@ -237,8 +237,9 @@ function check(name, actual, expected) {
     );
   }
 
-  // 属性を使っていないページで PowerShell を起動させない。この性質が崩れると、
-  // 拡張機能を入れているだけであらゆるページでプロセスが常駐する。
+  // prewarm の判定は属性の有無だけで決まる。ここが崩れると、属性を持たない
+  // ページからも prewarm が飛び、判定が modeOf() と二重になって食い違う。
+  // （ブラウザ起動時の常駐そのものは onStartup が担う別の話。）
   {
     const t = loadContent({ attr: null });
     t.document.fire('DOMContentLoaded', {});
@@ -452,7 +453,7 @@ function check(name, actual, expected) {
     check('background が onStartup にハンドラを登録する', typeof startupHandler, 'function');
     check('onStartup の登録だけでは connectNative を呼ばない', connectStats.count, 0);
 
-    startupHandler();
+    if (typeof startupHandler === 'function') startupHandler();
     await sleep(10);
     check('onStartup の発火で connectNative を 1 回だけ呼ぶ', connectStats.count, 1);
     // ping だけであること = ウィンドウ解決も IME 操作もしないこと。
@@ -470,7 +471,7 @@ function check(name, actual, expected) {
       respond: (m) => (m.cmd === 'ping' ? { id: m.id, ok: true } : undefined),
     });
 
-    startupHandler();
+    if (typeof startupHandler === 'function') startupHandler();
     await sleep(10);
     listener({ type: 'ime', prewarm: true }, {}, () => {});
     await sleep(10);
