@@ -5,6 +5,10 @@ host/*.json
 # 動作確認用の一時ファイル
 _*
 
+# 診断ログ（host\debug.on を置くと ime-host.ps1 が出力する）
+host/debug.on
+host/debug.log
+
 # Windows
 Thumbs.db
 desktop.ini
