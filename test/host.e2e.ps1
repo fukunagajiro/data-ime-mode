@@ -164,6 +164,8 @@ if ($ime -eq [IntPtr]::Zero) {
 $orig = Get-State $ime
 Write-Host ("  対象ウィンドウの元の状態: open={0} conv={1}" -f $orig.open, (Hex $orig.conv))
 
+$pingProc = $null
+
 $proc = Start-ImeHost $hostCopy
 
 try {
@@ -258,8 +260,28 @@ try {
     $now = Get-State $ime
     Check 'ポート断: open が元に戻る' $now.open 0
     Check 'ポート断: conv が元に戻る' (Hex $now.conv) (Hex $BASE)
+
+    # --- ping は IME に触らない -----------------------------------------------
+    # prewarm は ping を送るだけ。ここで lastChange が設定されると、ポートが
+    # 切れたときに「元へ戻す」処理が走り、ユーザー自身が選んだ状態を
+    # prewarm が書き換えてしまう。別プロセスを起こして確かめる。
+    Set-State $ime 1 0x001B
+    $baseline = Get-State $ime
+    $pingProc = Start-ImeHost $hostCopy
+    $r = Invoke-Host $pingProc @{ cmd = 'ping'; id = 200 }
+    Check 'ping: 応答する' "$($r.ok)" 'True'
+    $pingProc.StandardInput.Close()
+    if (-not $pingProc.WaitForExit(8000)) { throw 'ping だけのホストが終了しない' }
+    Start-Sleep -Milliseconds $SETTLE_MS
+    $now = Get-State $ime
+    Check 'ping のみ: ポート断でも open が変わらない' $now.open $baseline.open
+    Check 'ping のみ: ポート断でも conv が変わらない' (Hex $now.conv) (Hex $baseline.conv)
 }
 finally {
+    if ($null -ne $pingProc -and -not $pingProc.HasExited) {
+        try { $pingProc.StandardInput.Close() } catch { }
+        $pingProc.WaitForExit(3000) | Out-Null
+    }
     if (-not $proc.HasExited) {
         try { $proc.StandardInput.Close() } catch { }
         $proc.WaitForExit(3000) | Out-Null
