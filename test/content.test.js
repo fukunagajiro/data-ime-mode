@@ -245,6 +245,34 @@ function check(name, actual, expected) {
     check('background がホストへ set を送る', posted.length > 0 && posted[0].cmd, 'set');
   }
 
+  // ---- background.js: prewarm を独立したコンテキストでテスト ----
+  // (acquire/release で queue がブロックされないように)
+  {
+    let listener = null;
+    const posted = [];
+    const port = {
+      onMessage: { addListener() {} },
+      onDisconnect: { addListener() {} },
+      postMessage(m) { posted.push(m); },
+    };
+    const chrome = {
+      runtime: {
+        connectNative: () => port,
+        onMessage: { addListener: (fn) => { listener = fn; } },
+        lastError: null,
+      },
+    };
+    const ctx = { chrome, setTimeout, clearTimeout, setInterval: () => 0, console, Promise };
+    vm.createContext(ctx);
+    vm.runInContext(fs.readFileSync(BACKGROUND, 'utf8'), ctx);
+
+    let respondedPrewarm = false;
+    listener({ type: 'ime', prewarm: true }, {}, () => { respondedPrewarm = true; });
+    check('background が prewarm に応答する (新コンテキスト)', respondedPrewarm, true);
+    await sleep(10);
+    check('background が prewarm を ping にする', posted.map((m) => m.cmd), ['ping']);
+  }
+
   // ---- 結果 ----------------------------------------------------------------
 
   let bad = 0;
