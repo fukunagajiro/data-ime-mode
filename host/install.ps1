@@ -34,11 +34,29 @@ $json = $manifest | ConvertTo-Json -Depth 4
 [IO.File]::WriteAllText($manPath, $json, (New-Object Text.UTF8Encoding($false)))
 
 $key = "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\$HostName"
+
+# フォルダをコピー / 名前変更した場合、前の場所の登録が残ったままになる。
+# 黙って上書きすると「直したはずのコードが動かない」の原因が見えないので控えておく。
+$previous = $null
+if (Test-Path $key) {
+    $previous = (Get-ItemProperty -Path $key -ErrorAction SilentlyContinue).'(default)'
+}
+
 New-Item -Path $key -Force | Out-Null
 New-ItemProperty -Path $key -Name '(default)' -Value $manPath -PropertyType String -Force | Out-Null
 
 Write-Host "登録しました。" -ForegroundColor Green
 Write-Host "  manifest : $manPath"
 Write-Host "  registry : $key"
+
+if ($previous -and $previous -ne $manPath) {
+    Write-Host ""
+    Write-Host "以前の登録を別の場所から付け替えました:" -ForegroundColor Yellow
+    Write-Host "  旧 : $previous"
+    Write-Host "  新 : $manPath"
+    Write-Host "旧フォルダが残っている場合、edge://extensions に読み込み済みの拡張機能も" -ForegroundColor Yellow
+    Write-Host "そちらを指している可能性があります。読み込み直して ID を確認してください。" -ForegroundColor Yellow
+}
+
 Write-Host ""
 Write-Host "Edge を完全に終了してから起動し直してください（タスクトレイの常駐も含む）。"
