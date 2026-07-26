@@ -164,6 +164,8 @@ if ($ime -eq [IntPtr]::Zero) {
 $orig = Get-State $ime
 Write-Host ("  対象ウィンドウの元の状態: open={0} conv={1}" -f $orig.open, (Hex $orig.conv))
 
+$pingProc = $null
+
 $proc = Start-ImeHost $hostCopy
 
 try {
@@ -258,8 +260,44 @@ try {
     $now = Get-State $ime
     Check 'ポート断: open が元に戻る' $now.open 0
     Check 'ポート断: conv が元に戻る' (Hex $now.conv) (Hex $BASE)
+
+    # --- ping は IME に触らない -----------------------------------------------
+    # prewarm は ping を送るだけ。危険なのは ping の直後からポートが切れるまでの
+    # 間に、ユーザー自身が IME を切り替えるケース。ここで ping が lastChange を
+    # 記録してしまうと、ポート断時の「元へ戻す」処理がユーザーの変更を
+    # prewarm 実行前の状態へ勝手に巻き戻してしまう。単に無変化を保つだけでは
+    # この壊れ方を検出できない（巻き戻し先と現在値が同値だと書き込みが
+    # スキップされ、区別がつかない）ので、ping の後でユーザー操作を模して
+    # 状態を変えてから確かめる。
+    Set-State $ime 1 0x001B
+    $baseline = Get-State $ime
+    # baseline が afterPing と別の値であることに、この後の判定は依存している
+    # (下のコメント参照)。ここで意図どおりの値を作れているか確かめておかないと、
+    # baseline が想定と違っていても afterPing と偶然食い違うだけで
+    # テストが非自明なまま通ってしまう。
+    Check 'ping: 前提として baseline を作れている' "$($baseline.open)/$(Hex $baseline.conv)" "1/$(Hex 0x001B)"
+    $pingProc = Start-ImeHost $hostCopy
+    $r = Invoke-Host $pingProc @{ cmd = 'ping'; id = 200 }
+    Check 'ping: 応答する' "$($r.ok)" 'True'
+
+    # ping の直後、ユーザー自身が IME を切り替えたことを模す。baseline とは
+    # open・conv とも異なる値にして、巻き戻り先の baseline と区別できるようにする。
+    Set-State $ime 0 0x0009
+    $afterPing = Get-State $ime
+    Check 'ping のみ: 前提として baseline と異なる状態を作れている' "$($afterPing.open)/$(Hex $afterPing.conv)" "0/$(Hex 0x0009)"
+
+    $pingProc.StandardInput.Close()
+    if (-not $pingProc.WaitForExit(8000)) { throw 'ping だけのホストが終了しない' }
+    Start-Sleep -Milliseconds $SETTLE_MS
+    $now = Get-State $ime
+    Check 'ping のみ: ポート断でユーザーの変更が巻き戻らない (open)' $now.open $afterPing.open
+    Check 'ping のみ: ポート断でユーザーの変更が巻き戻らない (conv)' (Hex $now.conv) (Hex $afterPing.conv)
 }
 finally {
+    if ($null -ne $pingProc -and -not $pingProc.HasExited) {
+        try { $pingProc.StandardInput.Close() } catch { }
+        $pingProc.WaitForExit(3000) | Out-Null
+    }
     if (-not $proc.HasExited) {
         try { $proc.StandardInput.Close() } catch { }
         $proc.WaitForExit(3000) | Out-Null

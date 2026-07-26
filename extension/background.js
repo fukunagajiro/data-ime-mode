@@ -93,6 +93,17 @@ function enqueue(fn) {
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || msg.type !== 'ime') return;
+
+  // prewarm は spec の判定より前に処理する。spec を持たないメッセージは
+  // release として扱われるので、後ろに置くとページを開くたびに解放が走る。
+  // ping はホスト側でウィンドウ解決も IME 操作もせず即返るので、ポートを
+  // 開けてプロセスを起こすだけで済む。
+  if (msg.prewarm) {
+    enqueue(() => call({ cmd: 'ping' }));
+    sendResponse({ ok: true });
+    return;
+  }
+
   enqueue(() => (msg.spec ? acquire(msg.spec) : release()));
   // 受領だけを即座に返す。応答しないとポートが無応答のまま閉じ、送信側の
   // Promise が reject するため、content.js から「届いた」と「届かなかった」が

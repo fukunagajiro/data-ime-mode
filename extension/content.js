@@ -23,6 +23,30 @@ const RELEASE_DELAY_MS = 40;
 // 他アプリまで汚染されたまま取り残される。
 const UNKNOWN = Symbol('unknown');
 
+// ホストの PowerShell 起動は実測 1.2 秒かかる（内訳: powershell の起動 650ms と
+// Add-Type による C# の実行時コンパイル 350ms）。フォーカスしてから払うと体感の
+// 遅れになるので、対象欄を持つ文書を開いた時点で温めておく。ポートを持つのは
+// サービスワーカーなので、1 度温めれば全タブで共有される。
+let prewarmSent = false;
+
+function prewarm() {
+  if (prewarmSent) return;
+  // 属性の存在だけを見る。値が既知のモードかは modeOf() の仕事で、判定を
+  // 2 か所に持つと食い違って壊れる。属性を使っていないページでは 1 通も
+  // 送らないので、PowerShell は起動しない。
+  if (!document.querySelector(`[${ATTR}]`)) return;
+  prewarmSent = true;
+  try {
+    // 適用ではないので currentMode には触らず、失敗も捨てる。forget() を
+    // 呼ぶと重複排除の状態が汚れる。温め損なっても、次の適用が起動コストを
+    // 払うだけで動作は正しい。
+    const sent = chrome.runtime.sendMessage({ type: 'ime', prewarm: true });
+    if (sent && typeof sent.catch === 'function') sent.catch(() => {});
+  } catch {
+    // 拡張機能の再読み込み中。次の適用でまた起動が試みられる。
+  }
+}
+
 let currentMode = null;
 let releaseTimer = null;
 
@@ -103,3 +127,11 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') releaseNow();
   else reapplyNow();
 });
+
+// content script は document_start で走るので、この時点では DOM がまだ無い。
+// 他の実行タイミングで読み込まれても壊れないよう、両方に備える。
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', prewarm, { once: true });
+} else {
+  prewarm();
+}
