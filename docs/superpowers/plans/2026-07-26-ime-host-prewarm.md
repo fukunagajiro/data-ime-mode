@@ -200,6 +200,26 @@ function loadContent({ reply = 'ack', sendImpl, attr = 'hiragana', readyState = 
 
   // prewarm の失敗で forget() を呼ぶと currentMode が UNKNOWN になり、同じモードが
   // 二重に送られる。prewarm の失敗は捨てるだけであることの裏取り。
+  //
+  // 実行時の訂正（2026-07-26）: 下の当初案は判別力を持たない。prewarm の失敗が
+  // currentMode = null のうちに届くため、forget() を仕込んでも null -> UNKNOWN に
+  // しかならず、次の apply から見て null と区別できない（レビューで実証済み）。
+  // 失敗は「実際のモードが記録された後」に届かせること。同ファイルの
+  // 「遅れて届いた失敗が新しい状態を消さない」と同じ、reject を保留する書き方にする:
+  //
+  //   let rejectPrewarm; let n = 0;
+  //   const t = loadContent({
+  //     sendImpl: () => (++n === 1 ? new Promise((_, rej) => { rejectPrewarm = rej; }) : REPLY.ack()),
+  //   });
+  //   t.document.fire('DOMContentLoaded', {});                  // prewarm は保留のまま
+  //   t.document.fire('focusin', { target: el('hiragana') });   // currentMode = 'hiragana'
+  //   await sleep(10);
+  //   rejectPrewarm(new Error('late'));                         // ここで初めて失敗
+  //   await sleep(10);
+  //   t.document.fire('focusin', { target: el('hiragana') });
+  //   check('prewarm が失敗しても適用は 1 回だけ', t.sent, ['prewarm', 'hiragana']);
+  //
+  // 当初案（判別力なし。参考として残す）:
   {
     let n = 0;
     const t = loadContent({ sendImpl: () => (++n === 1 ? REPLY.dead() : REPLY.ack()) });
