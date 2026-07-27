@@ -116,3 +116,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 setInterval(() => {
   if (port) call({ cmd: 'ping' });
 }, KEEPALIVE_MS);
+
+// Edge の起動時点で温める。属性付きページを開いた時では、autofocus された
+// 対象欄には間に合わない（フォーカスと prewarm が同じ瞬間に起きる）。
+chrome.runtime.onStartup.addListener(() => enqueue(() => call({ cmd: 'ping' })));
