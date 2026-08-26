@@ -8,6 +8,11 @@ let port = null;
 let seq = 0;
 const waiters = new Map();
 
+// ポートが切れた理由。ホスト未登録なら connectNative は同期的に throw せず、
+// "Specified native messaging host not found." で切断する。popup の診断は
+// この文字列がないと「登録されていない」と「起動したが応答しない」を区別できない。
+let lastDisconnect = null;
+
 // The window we touched and the IME state it had before we touched it.
 let saved = null; // { hwnd, open, conv }
 
@@ -30,6 +35,7 @@ function connect() {
 
   port.onDisconnect.addListener(() => {
     const err = chrome.runtime.lastError;
+    lastDisconnect = err ? err.message : null;
     if (err) console.warn('[data-ime-mode] native host disconnected:', err.message);
     port = null;
     saved = null;
@@ -93,6 +99,20 @@ function enqueue(fn) {
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || msg.type !== 'ime') return;
+
+  // popup からの疎通確認。ホストへ実際に ping を通し、結果を非同期に返す。
+  // ここだけ true を返してチャネルを開けたままにする。下の 'ime' 側は
+  // 受領を同期的に返す必要があるので（README 「送信に失敗したとき」①）、
+  // リスナ全体を async にはしない。
+  if (msg.probe) {
+    enqueue(() =>
+      call({ cmd: 'ping' }).then((r) => {
+        if (r && r.ok) sendResponse({ ok: true });
+        else sendResponse({ ok: false, error: (r && r.error) || 'unknown', detail: lastDisconnect });
+      })
+    );
+    return true;
+  }
 
   // prewarm は spec の判定より前に処理する。spec を持たないメッセージは
   // release として扱われるので、後ろに置くとページを開くたびに解放が走る。
