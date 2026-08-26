@@ -1,7 +1,7 @@
 // Owns the native port and the "what did we change, and to what" bookkeeping.
 // The host is stateless apart from its own crash-safety restore.
 
-const HOST_NAME = 'com.example.data_ime_mode';
+const HOST_NAME = 'io.github.fukunagajiro.data_ime_mode';
 const KEEPALIVE_MS = 20000;
 
 let port = null;

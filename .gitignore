@@ -12,3 +12,6 @@ host/debug.log
 # Windows
 Thumbs.db
 desktop.ini
+
+# 拡張機能 ID の元になる秘密鍵（manifest には公開鍵だけを載せる）
+*.pem
