@@ -10,6 +10,7 @@ const vm = require('vm');
 
 const CONTENT = process.argv[2] || path.join(__dirname, '..', 'extension', 'content.js');
 const BACKGROUND = process.argv[3] || path.join(__dirname, '..', 'extension', 'background.js');
+const DIAGNOSE = path.join(__dirname, '..', 'extension', 'diagnose.js');
 
 // ブラウザは未処理の reject をログに出すだけで停止しない。挙動を合わせる。
 let unhandled = 0;
@@ -74,9 +75,10 @@ function loadBackground({ respond } = {}) {
   // 時点のコピーしか返せない）。
   const connectStats = { count: 0 };
   let onMessageHandler = null;
+  let onDisconnectHandler = null;
   const port = {
     onMessage: { addListener(fn) { onMessageHandler = fn; } },
-    onDisconnect: { addListener() {} },
+    onDisconnect: { addListener(fn) { onDisconnectHandler = fn; } },
     postMessage(m) {
       posted.push(m);
       // 応答ハンドラが登録されていれば非同期で応答を返す
@@ -100,7 +102,14 @@ function loadBackground({ respond } = {}) {
   const ctx = { chrome, setTimeout, clearTimeout, setInterval: () => 0, console, Promise };
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(BACKGROUND, 'utf8'), ctx);
-  return { listener, startupHandler, posted, connectStats };
+  // ホスト未登録は connectNative の throw ではなく切断として現れる。
+  // その経路を通せないと popup の診断が実機でしか確かめられない。
+  const disconnect = (message) => {
+    chrome.runtime.lastError = message ? { message } : null;
+    if (onDisconnectHandler) onDisconnectHandler();
+    chrome.runtime.lastError = null;
+  };
+  return { listener, startupHandler, posted, connectStats, disconnect };
 }
 
 const results = [];
@@ -476,6 +485,83 @@ function check(name, actual, expected) {
     listener({ type: 'ime', prewarm: true }, {}, () => {});
     await sleep(10);
     check('onStartup の後のページ prewarm は connectNative を増やさない', connectStats.count, 1);
+  }
+
+  // ---- background.js: popup からの疎通確認 (probe) -------------------------
+  //
+  // probe だけは応答を非同期に返す。'ime' 側を巻き込んで async にすると、
+  // 受領の同期応答（上のアサーション）が壊れて reject と区別できなくなる。
+  {
+    const { listener, posted } = loadBackground({
+      respond: (m) => (m.cmd === 'ping' ? { id: m.id, ok: true } : undefined),
+    });
+
+    let reply = null;
+    const ret = listener({ type: 'ime', probe: true }, {}, (r) => { reply = r; });
+    check('probe が応答チャネルを開けたままにする (true を返す)', ret, true);
+    check('probe は同期には応答しない', reply, null);
+
+    await sleep(20);
+    check('疎通していれば probe は ok を返す', reply, { ok: true });
+    // ping だけであること = 疎通確認が IME に触らないこと。
+    check('probe はホストへ ping だけを送る', posted.map((m) => m.cmd), ['ping']);
+  }
+
+  // ---- background.js: ホストが登録されていない場合の probe ------------------
+  //
+  // connectNative は未登録でも同期的に throw せず、切断として現れる。
+  // 理由の文字列を落とすと popup は「未登録」と「応答しない」を区別できず、
+  // 利用者にはどちらも「何も起きない」に見える。
+  {
+    const { listener, disconnect } = loadBackground();
+
+    let reply = null;
+    listener({ type: 'ime', probe: true }, {}, (r) => { reply = r; });
+    await sleep(10);
+    disconnect('Specified native messaging host not found.');
+    await sleep(10);
+
+    check('未登録なら probe は ok:false を返す', reply && reply.ok, false);
+    check(
+      'probe が切断理由を detail に載せる',
+      reply && reply.detail,
+      'Specified native messaging host not found.',
+    );
+  }
+
+  // ---- diagnose.js: 届かない理由の分類 -------------------------------------
+  //
+  // README「動かないとき」の表と 1 対 1。ここが崩れると popup は表にある
+  // 診断を出せなくなり、利用者にはどの原因も同じ「何も起きない」に見える。
+  //
+  // 起動できないホスト（Constrained Language Mode に阻まれた Add-Type、
+  // レジストリが指す旧フォルダに ime-host.bat が無い）は即終了するので、
+  // タイムアウトではなく切断として届く。timeout だけを見ていると、
+  // 実際に起きる経路が generic に落ちる。
+  {
+    const ctx = { module: { exports: {} }, console };
+    vm.createContext(ctx);
+    vm.runInContext(fs.readFileSync(DIAGNOSE, 'utf8'), ctx);
+    const classify = ctx.classifyHostFailure;
+
+    check('分類関数が読み込める', typeof classify, 'function');
+    check(
+      '未登録の切断は unregistered',
+      classify({ ok: false, error: 'disconnected', detail: 'Specified native messaging host not found.' }),
+      'unregistered',
+    );
+    check(
+      'ホストが即終了した切断は no-response',
+      classify({ ok: false, error: 'disconnected', detail: 'Native host has exited.' }),
+      'no-response',
+    );
+    check(
+      '理由不明の切断も no-response',
+      classify({ ok: false, error: 'disconnected', detail: null }),
+      'no-response',
+    );
+    check('無応答は no-response', classify({ ok: false, error: 'timeout' }), 'no-response');
+    check('どれとも言えなければ unknown', classify({ ok: false, error: 'weird' }), 'unknown');
   }
 
   // ---- 結果 ----------------------------------------------------------------

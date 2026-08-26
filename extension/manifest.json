@@ -3,7 +3,24 @@
   "name": "data-ime-mode",
   "version": "1.0.0",
   "description": "data-ime-mode 属性で入力欄フォーカス時の IME オン/オフを制御します (Windows / Edge)",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoYKZU1uJr8rOnSDGBsQM77NB89GVQWWOiXFYMI7Y+mdxGcDGeLu1JmGlLknM+r4nOrAt3hBJIn5lB6Tt98Rrf0BPcjSkTeJspfgkKzI/gctWPTYGpoWk7Gd47D82maGQZyuoZiQwbrv6h9BO21q4BSyM0lntvgew9XxhS6qCILkKmie0vTRGdcEzaEk0l1qbc/2GHmNaeIByfWNa3BsGn4Kc55LGgMBe4klRKxQFHIKld3ZW0DMHEgumThJ0B5CUNwx9HNdeorlTbEOW7Idi0tSNMSn1dNMh9SRWMjFvJT/FTTNQ6/8YtEN75nbdQKIJM3X90qvYd7Da8c+OWuHJrQIDAQAB",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "permissions": ["nativeMessaging"],
+  "action": {
+    "default_title": "data-ime-mode",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
   "background": {
     "service_worker": "background.js"
   },

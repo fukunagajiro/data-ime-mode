@@ -1,4 +1,4 @@
-param([string]$HostName = 'com.example.data_ime_mode')
+param([string]$HostName = 'io.github.fukunagajiro.data_ime_mode')
 
 $ErrorActionPreference = 'Stop'
 

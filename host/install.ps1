@@ -1,16 +1,18 @@
 # Registers the native messaging host for Microsoft Edge (current user only).
 #
-#   powershell -ExecutionPolicy Bypass -File install.ps1 -ExtensionId <32文字のID>
+#   powershell -ExecutionPolicy Bypass -File install.ps1
 #
-# 拡張機能IDは edge://extensions で「開発者モード」をオンにし、
-# このリポジトリの extension\ フォルダを「展開して読み込み」した後に表示されます。
+# 拡張機能 ID は extension\manifest.json の "key"（公開鍵）から決まるので、
+# フォルダをどこに置いても変わらない。既定値はその鍵から算出した ID。
+# ★ manifest.json の "key" を差し替えたら、この既定値も更新すること。
+#    （ID = 公開鍵 DER の SHA-256 先頭 16 バイトを 0-9a-f → a-p に写したもの）
+# key を取り除いた版を読み込んだ場合だけ -ExtensionId で上書きする。
 
 param(
-    [Parameter(Mandatory = $true)]
     [ValidatePattern('^[a-p]{32}$')]
-    [string]$ExtensionId,
+    [string]$ExtensionId = 'dncpkhppdjjedljfngmbbafgpifhlkae',
 
-    [string]$HostName = 'com.example.data_ime_mode'
+    [string]$HostName = 'io.github.fukunagajiro.data_ime_mode'
 )
 
 $ErrorActionPreference = 'Stop'
