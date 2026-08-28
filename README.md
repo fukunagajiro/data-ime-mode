@@ -6,7 +6,7 @@ IE の CSS `ime-mode` 相当を、Windows の Edge で `data-ime-mode` 属性と
 <input type="text" data-ime-mode="half-katakana">
 ```
 
-![data-ime-mode の動作。inactive の欄には abc、katakana の欄にはアイウエオ、half-katakana の欄にはｱｲｳｴｵ が入力される様子](demo.gif)
+![4 つの入力欄に同じ aiueo を打つと、hiragana の欄はあいうえお、katakana の欄はアイウエオ、half-katakana の欄はｱｲｳｴｵ、inactive の欄は aiueo になる様子](demo.gif)
 
 | 値 | フォーカス時の挙動 | IME 表示 |
 |---|---|---|
