@@ -2,6 +2,8 @@
 
 IE の CSS `ime-mode` 相当を、Windows の Edge で `data-ime-mode` 属性として再現するブラウザ拡張です。
 
+作った経緯と、`inputmode` や IMM32 では代替できない理由は Zenn の記事「[IE の ime-mode を Edge の拡張機能で再現した](https://zenn.dev/fukunagajiro/articles/data-ime-mode)」に書いています。
+
 ```html
 <input type="text" data-ime-mode="half-katakana">
 ```
